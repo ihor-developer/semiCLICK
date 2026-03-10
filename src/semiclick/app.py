@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import signal
 import sys
 
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from semiclick.core.storage import JsonStorage
 from semiclick.ui.main_window import MainWindow
@@ -19,4 +20,21 @@ def main() -> int:
     window = MainWindow(JsonStorage())
     window.show()
 
-    return app.exec()
+    signal.signal(signal.SIGINT, lambda *_: _request_shutdown(window, app))
+
+    keepalive_timer = QtCore.QTimer()
+    keepalive_timer.start(250)
+
+    try:
+        return app.exec()
+    except KeyboardInterrupt:
+        _request_shutdown(window, app)
+        return 0
+    finally:
+        keepalive_timer.stop()
+
+
+def _request_shutdown(window: MainWindow, app: QtWidgets.QApplication) -> None:
+    if window.isVisible():
+        window.close()
+    app.quit()

@@ -92,17 +92,18 @@ class MacroSequence:
     repeat_count: int | None = None
 
     def to_dict(self) -> dict[str, object]:
+        run_mode = coerce_run_mode(self.run_mode)
         return {
             "name": self.name,
             "steps": [step_to_dict(step) for step in self.steps],
-            "run_mode": self.run_mode.value,
+            "run_mode": run_mode.value,
             "repeat_count": self.repeat_count,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "MacroSequence":
         steps = [step_from_dict(raw_step) for raw_step in data.get("steps", [])]
-        run_mode = RunMode(str(data.get("run_mode", RunMode.ONCE.value)))
+        run_mode = coerce_run_mode(data.get("run_mode", RunMode.ONCE.value))
         repeat_count = data.get("repeat_count")
         repeat_number = int(repeat_count) if repeat_count is not None else None
         return cls(
@@ -111,6 +112,12 @@ class MacroSequence:
             run_mode=run_mode,
             repeat_count=repeat_number,
         )
+
+
+def coerce_run_mode(value: object) -> RunMode:
+    if isinstance(value, RunMode):
+        return value
+    return RunMode(str(value))
 
 
 @dataclass(slots=True)

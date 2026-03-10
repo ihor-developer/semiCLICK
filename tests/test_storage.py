@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +28,28 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(restored.sequence.run_mode, RunMode.REPEAT_N)
         self.assertEqual(restored.sequence.repeat_count, 2)
         self.assertEqual(len(restored.sequence.steps), 2)
+
+    def test_load_accepts_string_run_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "sequence": {
+                            "name": "String mode",
+                            "steps": [{"kind": "wait", "duration_ms": 100}],
+                            "run_mode": "repeat_forever",
+                            "repeat_count": None,
+                        },
+                        "settings": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            restored = JsonStorage(state_path).load()
+
+        self.assertEqual(restored.sequence.run_mode, RunMode.REPEAT_FOREVER)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from semiclick.core.models import (
     SUPPORTED_KEYS,
     WaitStep,
     WindowMatchConfig,
+    coerce_run_mode,
 )
 from semiclick.core.runner import MacroRunner
 from semiclick.core.storage import JsonStorage
@@ -269,9 +270,9 @@ class MainWindow(QtWidgets.QWidget):
         run_layout.addLayout(run_form)
 
         self.run_mode_combo = QtWidgets.QComboBox()
-        self.run_mode_combo.addItem("Run once", RunMode.ONCE)
-        self.run_mode_combo.addItem("Repeat N times", RunMode.REPEAT_N)
-        self.run_mode_combo.addItem("Repeat forever", RunMode.REPEAT_FOREVER)
+        self.run_mode_combo.addItem("Run once", RunMode.ONCE.value)
+        self.run_mode_combo.addItem("Repeat N times", RunMode.REPEAT_N.value)
+        self.run_mode_combo.addItem("Repeat forever", RunMode.REPEAT_FOREVER.value)
         self.run_mode_combo.currentIndexChanged.connect(self._on_run_mode_changed)
         run_form.addRow("Mode", self.run_mode_combo)
 
@@ -414,7 +415,7 @@ class MainWindow(QtWidgets.QWidget):
         self.sequence_name_edit.setText(self._sequence.name)
         self._refresh_steps()
 
-        run_mode_index = self.run_mode_combo.findData(self._sequence.run_mode)
+        run_mode_index = self.run_mode_combo.findData(self._sequence.run_mode.value)
         self.run_mode_combo.setCurrentIndex(max(0, run_mode_index))
         self.repeat_count_spin.setValue(self._sequence.repeat_count or 2)
         self._toggle_repeat_count_visibility()
@@ -458,8 +459,9 @@ class MainWindow(QtWidgets.QWidget):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._focus_timer.stop()
         self._hotkeys.unregister_all()
-        self._runner.stop()
-        self._runner.join(timeout=1)
+        if self._runner.state in {RunnerState.RUNNING, RunnerState.PAUSED}:
+            self._runner.stop()
+            self._runner.join(timeout=1)
         super().closeEvent(event)
 
     def add_key_step(self) -> None:
@@ -531,9 +533,9 @@ class MainWindow(QtWidgets.QWidget):
             self._sequence = replace(
                 self._sequence,
                 name=self.sequence_name_edit.text().strip() or self._sequence.name,
-                run_mode=self.run_mode_combo.currentData(),
+                run_mode=coerce_run_mode(self.run_mode_combo.currentData()),
                 repeat_count=self.repeat_count_spin.value()
-                if self.run_mode_combo.currentData() == RunMode.REPEAT_N
+                if coerce_run_mode(self.run_mode_combo.currentData()) == RunMode.REPEAT_N
                 else None,
             )
             validate_sequence(self._sequence)
@@ -629,11 +631,11 @@ class MainWindow(QtWidgets.QWidget):
         self._update_sequence_run_mode()
 
     def _toggle_repeat_count_visibility(self) -> None:
-        repeat_visible = self.run_mode_combo.currentData() == RunMode.REPEAT_N
+        repeat_visible = coerce_run_mode(self.run_mode_combo.currentData()) == RunMode.REPEAT_N
         self.repeat_count_spin.setVisible(repeat_visible)
 
     def _update_sequence_run_mode(self) -> None:
-        run_mode = self.run_mode_combo.currentData()
+        run_mode = coerce_run_mode(self.run_mode_combo.currentData())
         self._sequence.run_mode = run_mode
         self._sequence.repeat_count = (
             self.repeat_count_spin.value() if run_mode == RunMode.REPEAT_N else None
