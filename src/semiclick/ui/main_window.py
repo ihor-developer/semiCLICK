@@ -22,7 +22,7 @@ from semiclick.core.validation import ValidationError, validate_sequence, valida
 from semiclick.platforms.windows.hotkeys import GlobalHotkeyManager
 from semiclick.platforms.windows.input_sender import DirectInputSender
 from semiclick.platforms.windows.overlay import OverlayController
-from semiclick.platforms.windows.window_monitor import MinecraftWindowMonitor
+from semiclick.platforms.windows.window_monitor import MinecraftWindowMonitor, WindowInfo
 
 
 class StepDialog(QtWidgets.QDialog):
@@ -106,6 +106,69 @@ class UiBridge(QtCore.QObject):
     hotkey_toggle_interaction = QtCore.Signal()
 
 
+class ControlStrip(QtWidgets.QWidget):
+    def __init__(self, owner: "MainWindow") -> None:
+        super().__init__(None)
+        self._owner = owner
+        self.setWindowFlags(
+            QtCore.Qt.WindowType.Tool
+            | QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        frame = QtWidgets.QFrame()
+        frame.setObjectName("strip")
+        frame.setStyleSheet(
+            """
+            QFrame#strip {
+                background: rgba(18, 22, 31, 240);
+                border: 1px solid rgba(255, 255, 255, 26);
+                border-radius: 14px;
+            }
+            QLabel {
+                color: #eef3fc;
+            }
+            QPushButton {
+                background: #2e8b57;
+                border: none;
+                border-radius: 9px;
+                padding: 6px 10px;
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #349b62;
+            }
+            """
+        )
+        root.addWidget(frame)
+
+        layout = QtWidgets.QHBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
+
+        self.status_label = QtWidgets.QLabel()
+        layout.addWidget(self.status_label)
+
+        self.toggle_button = QtWidgets.QPushButton()
+        self.toggle_button.clicked.connect(owner.toggle_interaction_mode)
+        layout.addWidget(self.toggle_button)
+
+        self.snap_button = QtWidgets.QPushButton("Snap")
+        self.snap_button.clicked.connect(owner.snap_overlay_to_selected_window)
+        layout.addWidget(self.snap_button)
+
+    def sync_state(self, interactive_mode: bool, target_summary: str) -> None:
+        mode_label = "Edit mode" if interactive_mode else "Gameplay mode"
+        self.status_label.setText(f"{mode_label} | {target_summary}")
+        self.toggle_button.setText("Lock overlay" if interactive_mode else "Edit overlay")
+        self.adjustSize()
+
+
 class MainWindow(QtWidgets.QWidget):
     def __init__(self, storage: JsonStorage) -> None:
         super().__init__()
@@ -117,6 +180,7 @@ class MainWindow(QtWidgets.QWidget):
         self._drag_origin: QtCore.QPoint | None = None
         self._runner_state = RunnerState.IDLE
         self._current_focus = False
+        self._window_candidates: list[WindowInfo] = []
 
         self._bridge = UiBridge()
         self._bridge.runner_state_changed.connect(self._on_runner_state_changed)
@@ -136,6 +200,7 @@ class MainWindow(QtWidgets.QWidget):
         )
         self._hotkeys = GlobalHotkeyManager()
         self._overlay_controller = OverlayController(self.winId)
+        self._control_strip = ControlStrip(self)
 
         self._build_window()
         self._populate_from_state()
@@ -199,8 +264,9 @@ class MainWindow(QtWidgets.QWidget):
         chrome_layout.addLayout(status_layout)
         self.state_chip = QtWidgets.QLabel()
         self.focus_chip = QtWidgets.QLabel()
+        self.target_chip = QtWidgets.QLabel()
         self.hotkey_chip = QtWidgets.QLabel()
-        for widget in (self.state_chip, self.focus_chip, self.hotkey_chip):
+        for widget in (self.state_chip, self.focus_chip, self.target_chip, self.hotkey_chip):
             widget.setObjectName("chip")
             status_layout.addWidget(widget)
         status_layout.addStretch(1)
@@ -312,7 +378,12 @@ class MainWindow(QtWidgets.QWidget):
         self.opacity_spin.setDecimals(2)
         self.title_match_edit = QtWidgets.QLineEdit()
         self.process_names_edit = QtWidgets.QLineEdit()
+        self.target_window_combo = QtWidgets.QComboBox()
+        self.refresh_windows_button = QtWidgets.QPushButton("Refresh windows")
+        self.use_window_button = QtWidgets.QPushButton("Use selected")
+        self.snap_window_button = QtWidgets.QPushButton("Snap overlay")
 
+        settings_form.addRow("Visible windows", self.target_window_combo)
         settings_form.addRow("Start hotkey", self.start_hotkey_edit)
         settings_form.addRow("Stop hotkey", self.stop_hotkey_edit)
         settings_form.addRow("Panic hotkey", self.panic_hotkey_edit)
@@ -321,9 +392,19 @@ class MainWindow(QtWidgets.QWidget):
         settings_form.addRow("Window title", self.title_match_edit)
         settings_form.addRow("Process names", self.process_names_edit)
 
+        target_buttons = QtWidgets.QHBoxLayout()
+        target_buttons.addWidget(self.refresh_windows_button)
+        target_buttons.addWidget(self.use_window_button)
+        target_buttons.addWidget(self.snap_window_button)
+        settings_layout.addLayout(target_buttons)
+
+        self.refresh_windows_button.clicked.connect(self.refresh_window_list)
+        self.use_window_button.clicked.connect(self.use_selected_window)
+        self.snap_window_button.clicked.connect(self.snap_overlay_to_selected_window)
+
         help_label = QtWidgets.QLabel(
             "Edit the overlay only after pressing Esc in Minecraft. "
-            "Switch to gameplay mode to make the overlay ignore mouse clicks."
+            "Gameplay mode keeps the main overlay click-through, but the small control strip stays clickable."
         )
         help_label.setWordWrap(True)
         help_label.setObjectName("help")
@@ -432,11 +513,14 @@ class MainWindow(QtWidgets.QWidget):
         self.setWindowOpacity(self._settings.overlay_opacity)
         self._update_hotkey_summary()
         self._update_interaction_ui()
+        self.refresh_window_list()
         self._set_message("Ready.")
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
         self._overlay_controller.set_click_through(False)
+        self._control_strip.show()
+        self._position_control_strip()
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
@@ -456,12 +540,21 @@ class MainWindow(QtWidgets.QWidget):
         self._drag_origin = None
         super().mouseReleaseEvent(event)
 
+    def moveEvent(self, event: QtGui.QMoveEvent) -> None:
+        super().moveEvent(event)
+        self._position_control_strip()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._position_control_strip()
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._focus_timer.stop()
         self._hotkeys.unregister_all()
         if self._runner.state in {RunnerState.RUNNING, RunnerState.PAUSED}:
             self._runner.stop()
             self._runner.join(timeout=1)
+        self._control_strip.close()
         super().closeEvent(event)
 
     def add_key_step(self) -> None:
@@ -512,16 +605,19 @@ class MainWindow(QtWidgets.QWidget):
         self.step_table.selectRow(target_row)
         self._persist_state()
 
-    def apply_settings(self) -> None:
+    def apply_settings(self, preserve_selected_target: bool = False) -> None:
         try:
             settings = self._collect_settings()
             validate_settings(settings)
             self._settings = settings
+            if not preserve_selected_target:
+                self._window_monitor.clear_target_window()
             self._window_monitor.update_match_config(settings.minecraft_window_match)
             self.setWindowOpacity(settings.overlay_opacity)
             self._register_hotkeys()
             self._persist_state()
             self._update_hotkey_summary()
+            self._update_target_summary()
             self._set_message("Settings applied.")
         except ValidationError as exc:
             self._show_warning(str(exc))
@@ -625,6 +721,7 @@ class MainWindow(QtWidgets.QWidget):
         self._runner.set_focus_state(focused)
         focus_text = "Minecraft focused" if focused else "Minecraft not focused"
         self.focus_chip.setText(focus_text)
+        self._update_target_summary()
 
     def _on_run_mode_changed(self) -> None:
         self._toggle_repeat_count_visibility()
@@ -697,7 +794,8 @@ class MainWindow(QtWidgets.QWidget):
             "Hotkeys: "
             f"start {self._settings.start_hotkey} | "
             f"stop {self._settings.stop_hotkey} | "
-            f"panic {self._settings.panic_hotkey}"
+            f"panic {self._settings.panic_hotkey} | "
+            f"overlay {self._settings.toggle_overlay_hotkey}"
         )
 
     def _update_interaction_ui(self) -> None:
@@ -709,8 +807,94 @@ class MainWindow(QtWidgets.QWidget):
         else:
             self.mode_button.setText("Switch to edit mode")
             self.subtitle_label.setText(
-                "Gameplay mode is click-through. Use the toggle hotkey to edit again."
+                "Gameplay mode is click-through. Use the control strip or the toggle hotkey to edit again."
             )
+        self._update_target_summary()
+
+    def refresh_window_list(self) -> None:
+        self._window_candidates = self._window_monitor.list_candidate_windows()
+        self.target_window_combo.clear()
+        if not self._window_candidates:
+            self.target_window_combo.addItem("No visible windows found", None)
+            self._update_target_summary()
+            return
+
+        for info in self._window_candidates:
+            self.target_window_combo.addItem(self._format_window_label(info), info.hwnd)
+
+        preferred_index = self._preferred_window_index()
+        if preferred_index >= 0:
+            self.target_window_combo.setCurrentIndex(preferred_index)
+        self._update_target_summary()
+
+    def use_selected_window(self) -> None:
+        info = self._selected_window_candidate()
+        if info is None:
+            self._show_warning("Pick a visible window from the list first.")
+            return
+
+        self.title_match_edit.setText(info.title)
+        self.process_names_edit.setText(info.process_name)
+        self._window_monitor.set_target_window(info.hwnd)
+        self.apply_settings(preserve_selected_target=True)
+        self.snap_overlay_to_selected_window()
+        self._set_message(f"Target window set to {info.title}.")
+
+    def snap_overlay_to_selected_window(self) -> None:
+        info = self._selected_window_candidate() or self._window_monitor.find_matching_window()
+        if info is None:
+            self._show_warning("No target window is selected or matched yet.")
+            return
+
+        left, top, right, bottom = info.rect
+        margin = 24
+        self.move(left + margin, top + margin)
+        self.raise_()
+        self._position_control_strip()
+        self._set_message(f"Overlay snapped near {info.title}.")
+
+    def _selected_window_candidate(self) -> WindowInfo | None:
+        current_hwnd = self.target_window_combo.currentData()
+        if current_hwnd is None:
+            return None
+        for info in self._window_candidates:
+            if info.hwnd == current_hwnd:
+                return info
+        return None
+
+    def _preferred_window_index(self) -> int:
+        selected_hwnd = self._window_monitor.selected_target_hwnd
+        if selected_hwnd is not None:
+            for index, info in enumerate(self._window_candidates):
+                if info.hwnd == selected_hwnd:
+                    return index
+        for index, info in enumerate(self._window_candidates):
+            if self._window_monitor.matches_config(info):
+                return index
+        return 0 if self._window_candidates else -1
+
+    def _format_window_label(self, info: WindowInfo) -> str:
+        title = info.title if len(info.title) <= 45 else f"{info.title[:42]}..."
+        process_name = info.process_name or "unknown-process"
+        return f"{title} [{process_name}]"
+
+    def _update_target_summary(self) -> None:
+        selected = self._selected_window_candidate() or self._window_monitor.find_matching_window()
+        if selected is not None:
+            summary = self._format_window_label(selected)
+        else:
+            summary = f"match: {self._settings.minecraft_window_match.title_contains}"
+        self.target_chip.setText(f"Target: {summary}")
+        self._control_strip.sync_state(self._interactive_mode, summary)
+
+    def _position_control_strip(self) -> None:
+        if not self._control_strip.isVisible():
+            return
+        frame = self.frameGeometry()
+        strip_size = self._control_strip.sizeHint()
+        x = max(12, frame.right() - strip_size.width())
+        y = max(12, frame.top() - strip_size.height() - 8)
+        self._control_strip.move(x, y)
 
     def _set_message(self, message: str) -> None:
         self.message_label.setText(message)
